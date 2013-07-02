@@ -1,0 +1,500 @@
+    \{ read-set
+    \< (throwing-reader "Unreadable form")
+    \" read-regex
+    \! read-comment
+    \_ read-discard
+    nil))
+(read-string "#=(+ 1 2)")
+(defn- dispatch-macros [ch]
+  (case ch
+    \^ read-meta                ;deprecated
+    \' (wrapping-reader2 :var-quote)
+    \( read-fn
+    \= (wrapping-reader2 :read-eval) ;; read-eval
+    \{ read-set
+    \< (throwing-reader "Unreadable form")
+    \" (wrapping-reader2 :regex)  ;; read-regex
+    \! read-comment
+    \_ read-discard
+    nil))
+ (read-string "#\"foo\"")
+(read-string "^{:a 1} {}")
+(defn- read-number
+  [reader initch]
+  (loop [sb (doto (StringBuilder.) (.append initch))
+         ch (read-char reader)]
+    (if (or (whitespace? ch) (macros ch) (nil? ch))
+      (let [s (str sb)]
+        (unread reader ch)
+        (if
+            (match-number s)
+          {:head :number :value s}
+          (reader-error reader "Invalid number format [" s "]")))
+      (recur (doto sb (.append ch)) (read-char reader)))))
+(read-string "1")
+(defn- read-number
+  [reader initch]
+  (loop [sb (doto (StringBuilder.) (.append initch))
+         ch (read-char reader)]
+    (if (or (whitespace? ch) (macros ch) (nil? ch))
+      (let [s (str sb)]
+        (unread reader ch)
+        (if
+            (match-number s)
+          {:head :number :value (match-number s)}
+          (reader-error reader "Invalid number format [" s "]")))
+      (recur (doto sb (.append ch)) (read-char reader)))))
+(read-string "1")
+(name 'foo.bar/a)
+(name 'foo.bar.a)
+(defn- read-tagged [rdr initch]
+  (let [tag (read rdr true nil false)]
+    (if-not (symbol? (:value tag))
+      (reader-error rdr "Reader tag must be a symbol"))
+    (if-let [f (or (*data-readers* (:value tag))
+                   (default-data-readers (:value tag)))]
+      {:head :tagged-literal :body [tag (read rdr true nil true)]}
+      (if (.contains (name (:value tag)) ".")
+        {:head :constructor :body [tag (read rdr true nil true)]}
+        {:head :tagged-literal :body [tag (read rdr true nil true)]}))))
+ (read-string "foo/bar 1")
+ (read-string "#foo/bar 1")
+ (read-string "#foo.bar[1]")
+ (read-string "#foo.bar [1]")
+(read-string "\c")
+(read-string "\\c")
+(defn- read-char*
+  [rdr backslash]
+  (let [ch (read-char rdr)]
+    (if-not (nil? ch)
+      (let [token (read-token rdr ch)
+            token-len (count token)]
+        (let [result
+              (cond
+          (== 1 token-len)  (Character/valueOf (nth token 0))
+          (= token "newline") \newline
+          (= token "space") \space
+          (= token "tab") \tab
+          (= token "backspace") \backspace
+          (= token "formfeed") \formfeed
+          (= token "return") \return
+          (.startsWith token "u")
+          (let [c (read-unicode-char token 1 4 16)
+                ic (int c)]
+            (if (and (> ic upper-limit)
+                     (< ic lower-limit))
+              (reader-error rdr "Invalid character constant: \\u" (Integer/toString ic 16))
+              c))
+          (.startsWith token "x")
+          (read-unicode-char token 1 2 16)
+          (.startsWith token "o")
+          (let [len (dec token-len)]
+            (if (> len 3)
+              (reader-error rdr "Invalid octal escape sequence length: " len)
+              (let [uc (read-unicode-char token 1 len 8)]
+                (if (> (int uc) 0377)
+                  (reader-error rdr "Octal escape sequence must be in range [0, 377]")
+                  uc))))
+          :else (reader-error rdr "Unsupported character: \\" token))]
+          {:head :character :value result}
+          ))
+      (reader-error rdr "EOF while reading character"))))
+ (read-string "\\c")
+ (read-string "\"f\"")
+(defn- read-string*
+  [reader _]
+  (loop [sb (StringBuilder.)
+         ch (read-char reader)]
+    (case ch
+      nil (reader-error reader "EOF while reading string")
+      \\ (recur (doto sb (.append (escape-char sb reader)))
+                (read-char reader))
+      \" {:head :string :value (str sb)}
+      (recur (doto sb (.append ch)) (read-char reader)))))
+(read-string "\"f\"")
+ (read-string "^String 'x")
+(read-string "042")
+042
+(read-string "+0x42e")
+ (read-string "4/2"
+)
+4/2
+5/2
+ (read-string "5/2")
+ (read-string ":abc:def:ghi")
+ (read-string "'foo")
+(read-string "`foo
+"_
+)
+(read-string "`foo")
+ (read-string "#(foo bar baz)")
+l (read-string "#(apply + % %1 %3 %&)")
+(read-string "#uuid \"550e8400-e29b-41d4-a716-446655440000\"")
+(read-string "#clojure.tools.reader_test.foo[]")
+(read-string "#clojure.tools.reader_test.bar{:baz 1}")
+::foo
+'::foo
+:foo
+(clojure.core/namespace :foo)
+ (read-string ":foo")
+ (read-string "::foo")
+ (read-string ":foo/bar")
+(defn- read-keyword
+  [reader initch]
+  (let [ch (read-char reader)]
+    (if-not (whitespace? ch)
+      (let [token (read-token reader ch)
+            s (parse-symbol token)]
+        (if s
+          (let [^String ns (s 0)
+                ^String name (s 1)]
+            (if (identical? \: (nth token 0))
+              {:head :qualified-keyword :body [{:head :keyword :keyword (subs name 1)}]}
+              (keyword ns name)))
+          (reader-error reader "Invalid token: :" token)))
+      (reader-error reader "Invalid token: :"))))
+ (read-string ":foo/bar")
+ (read-string "::foo")
+(defn- read-keyword
+  [reader initch]
+  (let [ch (read-char reader)]
+    (if-not (whitespace? ch)
+      (let [token (read-token reader ch)
+            s (parse-symbol token)]
+        (if s
+          (let [^String ns (s 0)
+                ^String name (s 1)]
+            (if (identical? \: (nth token 0))
+              {:head :qualified-keyword :body [{:head :keyword :keyword (subs name 1)}]}
+              {:head :keyword :value (keyword ns name)}))
+          (reader-error reader "Invalid token: :" token)))
+      (reader-error reader "Invalid token: :"))))
+(read-string ":foo/bar")
+(defn read-regex2
+  [rdr ch]
+  (let [sb (StringBuilder.)]
+    (loop [ch (read-char rdr)]
+      (if (identical? \" ch)
+        {:head :regex :body [(str sb)]}
+        (if (nil? ch)
+          (reader-error rdr "EOF while reading regex")
+          (do
+            (.append sb ch )
+            (when (identical? \\ ch)
+              (let [ch (read-char rdr)]
+                (if (nil? ch)
+                  (reader-error rdr "EOF while reading regex"))
+                (.append sb ch)))
+            (recur (read-char rdr))))))))
+(defn- dispatch-macros [ch]
+  (case ch
+    \^ read-meta                ;deprecated
+    \' (wrapping-reader2 :var-quote)
+    \( read-fn
+    \= (wrapping-reader2 :read-eval) ;; read-eval
+    \{ read-set
+    \< (throwing-reader "Unreadable form")
+    \" read-regex2
+    \! read-comment
+    \_ read-discard
+    nil))
+(read-string "#\"foo\"")
+(read-string ":foo-bar")
+(read-string ":foo/bar")
+(read-string "::foo-bar")
+(defn- read-keyword
+  [reader initch]
+  (let [ch (read-char reader)]
+    (if-not (whitespace? ch)
+      (let [token (read-token reader ch)
+            s (parse-symbol token)]
+        (if s
+          (let [^String ns (s 0)
+                ^String name (s 1)]
+            (if (identical? \: (nth token 0))
+              {:head :qualified-keyword :body [{:head :keyword :keyword (subs name 1)}]}
+              {:head :keyword :value (keyword ns name)}))
+          (reader-error reader "Invalid token: :" token)))
+      (reader-error reader "Invalid token: :"))))
+ (read-string "::foo-bar")
+(defn- read-keyword
+  [reader initch]
+  (let [ch (read-char reader)]
+    (if-not (whitespace? ch)
+      (let [token (read-token reader ch)
+            s (parse-symbol token)]
+        (if s
+          (let [^String ns (s 0)
+                ^String name (s 1)]
+            (if (identical? \: (nth token 0))
+              {:head :qualified-keyword :body [{:head :keyword :keyword (keyword (subs name 1))}]}
+              {:head :keyword :value (keyword ns name)}))
+          (reader-error reader "Invalid token: :" token)))
+      (reader-error reader "Invalid token: :"))))
+(read-string "::foo-bar")
+(defn- read-keyword
+  [reader initch]
+  (let [ch (read-char reader)]
+    (if-not (whitespace? ch)
+      (let [token (read-token reader ch)
+            s (parse-symbol token)]
+        (if s
+          (let [^String ns (s 0)
+                ^String name (s 1)]
+            (if (identical? \: (nth token 0))
+              {:head :autoresolved-keyword :body [{:head :keyword :keyword (keyword (subs name 1))}]}
+              {:head :keyword :value (keyword ns name)}))
+          (reader-error reader "Invalid token: :" token)))
+      (reader-error reader "Invalid token: :"))))
+ (read-string "::foo-bar")
+(is (= :*+!-_? (read-string ":*+!-_?")))
+(read-string ":*+!-_?")
+(read-string ":abc:def:ghi")
+(read-string ":abc.def/ghi")
+(read-string ":abc/def.ghi")
+(read-string ":abc:def/ghi:jkl.mno")
+(read-string ":alphabet")
+(str #"\[\]?(\")\\")
+(read-string "#\"\\[\\]?(\\\")\\\\\"")
+(= (str #"\[\]?(\")\\")
+         (first (:body (read-string "#\"\\[\\]?(\\\")\\\\\""))))
+(read-string "'foo")
+(= '{:head :quote, :body [{:head :symbol, :value foo}]} (read-string "'foo"))
+'`user/foo
+(read-string "`foo")
+(= '{:head :syntax-quote, :body [{:head :symbol, :value foo}]} (read-string "`foo") )
+(read-string "`+")
+(read-string "`foo/bar")
+ (read-string "`1")
+`1
+(read-string "`(1 (~2 ~@(3)))")
+match-number
+(integer? 1)
+(float? 1)
+(float? 1.0)
+(class 3/2)
+(numerator 3/2)
+(denomenator 3/2)
+(denominator 3/2)
+(defn- read-number
+  [reader initch]
+  (loop [sb (doto (StringBuilder.) (.append initch))
+         ch (read-char reader)]
+    (if (or (whitespace? ch) (macros ch) (nil? ch))
+      (let [s (str sb)]
+        (unread reader ch)
+        (let [n (match-number s)]
+          (if n
+            (cond
+             (float? n) {:head :float :value n}
+             (integer? n) {:head :integer :value n}
+             (ratio? n) {:head :ratio :body [(numerator n) (denominator n)]}
+             )  
+           (reader-error reader "Invalid number format [" s "]"))))
+      (recur (doto sb (.append ch)) (read-char reader)))))
+ (read-string "`(1 (~2 ~@(3)))")
+(defn- read-unquote
+  [rdr comma]
+  (if-let [ch (peek-char rdr)]
+    (if (identical? \@ ch)
+      ((wrapping-reader2 :unquote-splicing) (doto rdr read-char) \@)
+      ((wrapping-reader2 :unquote) rdr \~))))
+(defn- macros [ch]
+  (case ch
+    \" read-string*
+    \: read-keyword
+    \; read-comment
+    \' (wrapping-reader2 :quote)
+    \@ (wrapping-reader2 :deref)
+    \^ read-meta
+    \` (wrapping-reader2 :syntax-quote)  ;; read-syntax-quote ;;(wrapping-reader 'syntax-quote)
+    \~ read-unquote
+    \( read-list
+    \) read-unmatched-delimiter
+    \[ read-vector
+    \] read-unmatched-delimiter
+    \{ read-map
+    \} read-unmatched-delimiter
+    \\ read-char*
+    ;;\% read-arg
+    \# read-dispatch
+    nil))
+ (read-string "`(1 (~2 ~@(3)))")
+(= {:head :syntax-quote, :body [{:head :list, :body [{:head :integer, :value 1} {:head :list, :body [{:head :unquote, :body [{:head :integer, :value 2}]} {:head :unquote-splicing, :body [{:head :list, :body [{:head :integer, :value 3}]}]}]}]}]} (read-string "`(1 (~2 ~@(3)))"))
+(read-string "@foo")
+(read-string "#'foo")
+(read-string "#(foo bar baz)")
+(read-string "#(apply + % %1 %3 %&)")
+(read-string "#=(+ 1 2)")
+(read-string "#inst \"2010-11-12T13:14:15.666\"")
+(read-string "#uuid \"550e8400-e29b-41d4-a716-446655440000\"")
+(read-string "#foo bar")
+(read-string "#clojure.tools.reader_test.foo[]")
+(read-string "#clojure.tools.reader_test.foo []")
+(read-string "#clojure.tools.reader_test.foo{}")
+(read-string "#clojure.tools.reader_test.foo{:foo bar}")
+(read-string "#clojure.tools.reader_test.bar{}")
+(read-string "#clojure.tools.reader_test.bar{:baz 1}")
+(read-string "#clojure.tools.reader_test.bar[1 nil]")
+(class nil)
+(read-string "#clojure.tools.reader_test.bar[1 2]")
+(read-string "true")
+(class true)
+(symbol? true)
+(symbol? nil)
+(symbol? '/)
+(symbol? 'true)
+(symbol? 'nil)
+NaN
+'NaN
+Double/NaN
+(symbol? Double/NaN)
+Double/NEGATIVE_INFINITY
+(symbol? Double/NEGATIVE_INFINITY)
+bool?
+boolean?
+(defn- read-symbol
+  [rdr initch]
+  (when-let [token (read-token rdr initch)]
+    (let [[line column] (when (indexing-reader? rdr)
+                          [(get-line-number rdr) (int (dec (get-column-number rdr)))])]
+      (case token
+        ;; special symbols
+        "nil" {:head :nil :value nil}
+        "true" {:head :boolean :value true}
+        "false" {:head :boolean :value false}
+        "/"  {:head :symbol :value '/}
+        "NaN" {:head :NaN :value Double/NaN}
+        "-Infinity" {:head :negative-infinity :value Double/NEGATIVE_INFINITY}
+        ("Infinity" "+Infinity") {:head :positive-infinity :value Double/POSITIVE_INFINITY}
+        (or (when-let [p (parse-symbol token)]
+              (with-meta {:head :symbol :value (symbol (p 0) (p 1))}
+                (when line
+                  {:line line :column column})))
+            (reader-error rdr "Invalid token: " token))))))
+(read-string "nil")
+(read-string "/")
+(read-string "true")
+(read-string "false")
+(read-string "NaN")
+(read-string "-Infinity")
+(read-string "Infinity")
+(read-string "-1")
+(read-string "#clojure.tools.reader_test.bar[1 nil]")
+(read-string "`1")
+(read-string "42")
+(read-string "+42")
+(read-string "-42")
+(read-string "42N")
+(== 42N 42)
+(read-string "+42N")
+(read-string "-42N")
+(read-string "0")
+(read-string "0N")
+(read-string "042")
+(== {:head :integer, :value 042}(read-string "042"))
+(== {:head :integer, :value -42N} (read-string "-42N"))
+(= {:head :integer, :value -42N} (read-string "-42N"))
+(= {:head :integer, :value 042}(read-string "042"))
+(instance? BigInt (:value (read-string "9223372036854775808")))
+(import 'clojure.lang.BigInt)
+ (instance? BigInt (:value (read-string "9223372036854775808")))
+ (read-string "0x42e")
+(read-string "42.23")
+(= {:head :float, :value 42.23} (read-string "42.23"))
+:value
+(instance? BigDecimal (:value (read-string "-1.M")))
+(read-string "-1.M")
+-1.M
+(read-string "42.23")
+(read-string "1e+1M")
+4/2
+(read-string "4/2")
+(read-string "+4/2")
+(read-string "5/2")
+(defn- read-number
+  [reader initch]
+  (loop [sb (doto (StringBuilder.) (.append initch))
+         ch (read-char reader)]
+    (if (or (whitespace? ch) (macros ch) (nil? ch))
+      (let [s (str sb)]
+        (unread reader ch)
+        (let [n (match-number s)]
+          (if n
+            (cond
+             (float? n) {:head :float :value n}
+             (integer? n) {:head :integer :value n}
+             (ratio? n) {:head :ratio :body [{:head :integer :value (numerator n)} {:head :integer :value (denominator n)}]}
+             )
+           (reader-error reader "Invalid number format [" s "]"))))
+      (recur (doto sb (.append ch)) (read-char reader)))))
+(read-string "5/2")
+(read-string "+5/2")
+(read-string "-5/2")
+(read-string "foo")
+(read-string "foo/bar")
+(read-string "*+!-_?")
+(read-string "abc:def:ghi")
+(read-string "abc.def/ghi")
+(read-string "abc/def.ghi")
+(read-string "abc:def/ghi:jkl.mno")
+(read-string "Infinity")
+(read-string "nil")
+(read-string "false")
+(read-string "true")
+ (= '{:head :boolean, :value true} (read-string "true"))
+(read-string "\\f")
+(read-string "\\u0194")
+(read-string "()")
+(read-string "(foo bar)")
+(read-string "(foo (bar) baz)")
+(read-string "[]")
+(read-string "[foo bar]")
+(read-string "[foo [bar] baz]")
+(read-string "{}")
+(read-string "{foo bar}")
+(read-string "{foo {bar baz}}"
+)
+(read-string "#{}")
+(read-string "#{foo bar}")
+(read-string "#{foo #{bar} baz}")
+(read-string "^:foo 'bar")
+(read-string "^{:foo bar} 'baz")
+(read-string "^\"foo\" 'bar")
+(read-string "^String 'x")
+(use 'clojure.tools.reader-test)
+run-tests
+(use 'clojure.test)
+(run-tests 'clojure.tools.reader-test)
+(read-string "\"foo bar\"")
+(use ' clojure.tools.reader)
+(read-string "\"foo bar\"")
+(read-string "\"foo\\\\bar\"")
+(read-string "\"foo\\000bar\"")
+"foo\000bar"
+(seq "foo\000bar")
+1.0e1M
+(float? 1.0e1M)
+(class 1.0e1M)
+(decimal? 1.0e1M)
+(use 'clojure.test)
+(run-tests 'clojure.tools.reader-test)
+(use 'clojure.tools.reader-test)
+ (run-tests 'clojure.tools.reader-test)
+(read-string "-1.M")
+(clojure.tools.reader/read-string "1")
+(clojure.tools.reader/read-string "-1.M")
+(use 'clojure.tools.reader-test)
+(use 'clojure.test)
+ (run-tests 'clojure.tools.reader-test)
+(class 0x42e)
+(float? 0x42e)
+(long? 0x42e)
+(integer? 0x42e)
+(use 'clojure.test)
+(use 'clojure.tools.reader-test)
+ (run-tests 'clojure.tools.reader-test)
+-42.2e-3
+(use 'clojure.test)
+(use 'clojure.tools.reader-test)
+ (run-tests 'clojure.tools.reader-test)
